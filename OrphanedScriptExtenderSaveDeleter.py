@@ -1,14 +1,22 @@
+import os
 import sys
+
+from functools import reduce
+from pathlib import Path
+from typing import List
 
 from PyQt5.QtCore import QCoreApplication, qDebug
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QMessageBox, QWidget
 
-if "mobase" not in sys.modules:
-    import mock_mobase as mobase
+import mobase
+
 
 class OrphanedScriptExtenderSaveDeleter(mobase.IPluginTool):
-    
+
+    __organizer: mobase.IOrganizer
+    __parentWidget: QWidget
+
     def __init__(self):
         super(OrphanedScriptExtenderSaveDeleter, self).__init__()
         self.__organizer = None
@@ -31,7 +39,15 @@ class OrphanedScriptExtenderSaveDeleter(mobase.IPluginTool):
         return mobase.VersionInfo(1, 0, 0, mobase.ReleaseType.final)
 
     def isActive(self):
-        return True
+        return bool(self.__organizer.managedGame().feature(mobase.ScriptExtender))
+
+    def requirements(self):
+        return [
+            mobase.PluginRequirementFactory.basic(
+                lambda o: bool(o.managedGame().feature(mobase.ScriptExtender)),
+                self.__tr("Can only active for game with appropriate script extenders.")
+            )
+        ]
 
     def settings(self):
         return []
@@ -47,32 +63,61 @@ class OrphanedScriptExtenderSaveDeleter(mobase.IPluginTool):
 
     def setParentWidget(self, widget):
         self.__parentWidget = widget
-    
+
+    def __listSkseFiles(self, game: mobase.IPluginGame, folder: Path) -> List[Path]:
+        if hasattr(game, "savegameSEExtension"):
+            ext = game.savegameSEExtension()
+        else:
+            ext = game.feature(mobase.ScriptExtender).savegameExtension()
+        return list(folder.glob("*" + ext))
+
+    def __filesToDelete(self, skseSaves: List[Path], game: mobase.IPluginGame, folder: Path) -> List[Path]:
+        # >= MO2 2.4
+        files = []
+        if not hasattr(game, "listSaves"):
+            ext = game.savegameExtension()
+            for save in skseSaves:
+                if not save.with_suffix("." + ext).is_file():
+                    files.append(save)
+
+        else:
+            saves = game.listSaves(QDir(folder.as_posix()))
+            allfiles = reduce(lambda r, s: r + s.allFiles(), saves, [])
+            files = list(set(skseSaves).difference(map(Path, allfiles)))
+
+        return files
+
     def display(self):
         # Give the user the opportunity to abort
-        confirmationButton = QMessageBox.question(self.__parentWidget, self.__tr("Before starting deletion..."), self.__tr("Please double check that you want your orphaned script extender saves deleted. If you proceed, you won't be able to get them back, even if you find you've copied the corresponding base game save somewhere else so still have a copy."), QMessageBox.StandardButtons(QMessageBox.Ok | QMessageBox.Cancel))
+        confirmationButton = QMessageBox.question(
+            self.__parentWidget, self.__tr("Before starting deletion..."),
+            self.__tr("Please double check that you want your orphaned script extender saves deleted. If you proceed, you won't be able to get them back, even if you find you've copied the corresponding base game save somewhere else so still have a copy."),
+            QMessageBox.StandardButtons(QMessageBox.Ok | QMessageBox.Cancel))
         if confirmationButton != QMessageBox.Ok:
             return
+
         managedGame = self.__organizer.managedGame()
-        gameSaveExtension = managedGame.savegameExtension()
-        skseSaveExtension = managedGame.savegameSEExtension()
-        gameSavesDirectory = managedGame.savesDirectory().absolutePath()
+        savesDirectory = Path(managedGame.savesDirectory().absolutePath())
         if self.__organizer.profile().localSavesEnabled():
-            gameSavesDirectory = os.path.join(self.__organizer.profile().absolutePath(), "saves")
-        count = 0
-        from glob import glob
-        for cosave in glob(os.path.join(gameSavesDirectory, "*." + skseSaveExtension)):
-            saveName = os.path.splitext(cosave)[0]
-            if not os.path.isfile(saveName + "." + gameSaveExtension):
-                os.remove(cosave)
-                count += 1
-        if count == 0:
-            QMessageBox.information(self.__parentWidget, self.__tr("No orphaned script extender saves found"), self.__tr("No orphaned script extender co-saves were found, so none were removed."))
+            savesDirectory = Path(self.__organizer.profile().absolutePath()).joinpath("saves")
+
+        skseSaves = self.__listSkseFiles(managedGame, savesDirectory)
+        toDelete = self.__filesToDelete(skseSaves, managedGame, savesDirectory)
+
+        for file in toDelete:
+            os.remove(file)
+
+        if not toDelete:
+            QMessageBox.information(self.__parentWidget,
+                self.__tr("No orphaned script extender saves found"),
+                self.__tr("No orphaned script extender co-saves were found, so none were removed."))
         else:
-            QMessageBox.information(self.__parentWidget, self.__tr("Orphaned script extender saves removed"), self.__tr("{0} orphaned script extender co-save(s) removed successfully.").format(count))
-    
+            QMessageBox.information(self.__parentWidget,
+                self.__tr("Orphaned script extender saves removed"),
+                self.__tr("{0} orphaned script extender co-save(s) removed successfully.").format(len(toDelete)))
+
     def __tr(self, str):
         return QCoreApplication.translate("OrphanedScriptExtenderSaveDeleter", str)
-    
+
 def createPlugin():
     return OrphanedScriptExtenderSaveDeleter()
